@@ -1,19 +1,79 @@
-#!/bin/sh
+#!/bin/bash
 
-set -e
+set -eu
 
 exec 3>&1 # make stdout available as fd 3 for the result
 exec 1>&2 # redirect all output to stderr for logging
 
-PAYLOAD=$(mktemp /tmp/resource-in.XXXXXX)
+payload=$(mktemp /tmp/resource-in.XXXXXX)
 
-cat > "$PAYLOAD" <&0
+cat > "${payload}" <&0
 
-TS=$(jq '.version.timestamp // empty' < "$PAYLOAD")
-[ -z "$TS" ] && TS='"none"'
+destination=$1
 
-jq -n "{
-  version: {
-    timestamp: $TS
-  }
-}" >&3
+if [ -z "$destination" ]; then
+  echo "usage: $0 <path/to/destination>" >&2
+  exit 1
+fi
+
+if ! jq -e '.version |
+  (.channel | type == "string") and
+  (.thread_ts | type == "string")' >/dev/null 2>&1 < "${payload}"
+then
+  echo 'invalid version: expected "channel" and "thread_ts"' >&2
+  exit 1
+fi
+
+if ! token=$(jq -re '.source.token' < "${payload}")
+then
+  echo "missing token in source config" >&2
+  exit 1
+fi
+
+curl_options=(
+  -H "Authorization: Bearer $token"
+  -H 'Content-Type: application/json; charset=utf-8'
+  -X POST
+  -o /tmp/output.json
+)
+
+if jq -e '.source.insecure' >/dev/null 2>&1 < "${payload}"
+then
+    curl_options+=( -k )
+fi
+
+if proxy=$(jq -re '.source.proxy' < "${payload}")
+then
+    curl_options+=( --proxy "${proxy}" )
+fi
+
+if jq -e '.source.proxy_https_tunnel' >/dev/null 2>&1 < "${payload}"
+then
+    curl_options+=( --proxytunnel )
+fi
+
+channel=$(jq -r '.version.channel' < "${payload}")
+
+body=$(jq \
+  --arg channel "$channel" '{
+    $channel,
+    latest: .version.thread_ts,
+    limit: 1,
+    inclusive: true
+  }' < "${payload}")
+
+if curl -fSs "${curl_options[@]}" -d "$body" https://slack.com/api/conversations.history
+then
+  thread_ts=$(jq -r '.messages[0] | .ts' < /tmp/output.json)
+  echo "$thread_ts" > "${destination}/thread_ts"
+  echo "$channel" > "${destination}/channel"
+else
+  ret=$?
+  echo "failed to fetch message" >&2
+  exit $ret
+fi
+
+jq -n \
+  --arg thread_ts "$thread_ts" \
+  --arg channel "$channel" \
+  '{ version: { $thread_ts, $channel } }' >&3

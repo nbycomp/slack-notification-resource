@@ -6,7 +6,7 @@ cd "${1}"
 
 exec 3>&1
 exec 1>&2
-set +x
+
 # for jq
 PATH=/usr/local/bin:$PATH
 
@@ -14,18 +14,19 @@ payload=$(mktemp /tmp/resource-in.XXXXXX)
 
 cat > "${payload}" <&0
 
-timestamp=$(date +%s)
-
-disable="$(jq -r '.source.disable' < "${payload}")"
-if [[ "$disable" == "true" ]]
+if jq -re '.source.disable' < "${payload}"
 then
-    jq -n --arg timestamp "$timestamp" '{ version: $timestamp }' >&3
+    jq -n --arg timestamp "$(date +%s)" '{
+      version: null,
+      metadata: [
+        { name: "timestamp", value: $ts }
+      ]
+    }' >&3
     exit 0
 fi
 
-webhook_url="$(jq -r '.source.url' < "${payload}")"
+webhook_url="$(jq -r '.source.url // "https://slack.com/api/chat.postMessage"' < "${payload}")"
 raw_ca_certs=$(jq -r '.source.ca_certs // []' < $payload)
-token="$(jq -r '.source.token' < "${payload}")"
 
 text_file="$(jq -r '.params.text_file // ""' < "${payload}")"
 text="$(jq -r '(.params.text // "${TEXT_FILE_CONTENT}")' < "${payload}")"
@@ -33,11 +34,11 @@ text="$(jq -r '(.params.text // "${TEXT_FILE_CONTENT}")' < "${payload}")"
 attachments="$(jq '(.params.attachments // null)' < "${payload}")"
 attachments_file="$(jq -r '.params.attachments_file // ""' < "${payload}")"
 
-channel="$(jq '.params.channel' < "${payload}")"
+channel="$(jq -r '.params.channel // ""' < "${payload}")"
+thread_ts="$(jq -r '.params.thread_ts // ""' < "${payload}")"
+
 username="$(jq '.params.username' < "${payload}")"
 
-debug="$(jq -r '.params.debug // "false"' < "${payload}")"
-silent="$(jq -r '.params.silent // "false"' < "${payload}")"
 always_notify="$(jq -r '.params.always_notify // "false"' < "${payload}")"
 redact_hook="$(jq -r '.params.redact_hook_url // "true"' < "${payload}")"
 
@@ -74,20 +75,44 @@ fi
 
 attachments=$(echo "$attachments" | envsubst)
 
+# if set, channel param takes precedence over channel_file
+if [[ -z $channel ]]
+then
+  channel_file="$(jq -r '.params.channel_file' < "${payload}")"
+  if [[ -n $channel_file && -f $channel_file ]]
+  then
+    channel=$(<"$channel_file")
+  fi
+fi
+
+# if set, thread_ts param takes precedence over thread_ts_file
+if [[ -z $thread_ts ]]
+then
+  thread_ts_file="$(jq -r '.params.thread_ts_file' < "${payload}")"
+  if [[ -n $thread_ts_file && -f $thread_ts_file ]]
+  then
+    thread_ts=$(<"$thread_ts_file")
+  fi
+fi
+
 curl_options=(
-  -H "Authorization: Bearer $token"
   -H 'Content-Type: application/json; charset=utf-8'
   -T /tmp/compact_body.json
   -X POST
   -o /tmp/output.json
 )
 
+if token="$(jq -re '.source.token' < "${payload}")"
+then
+  curl_options+=( -H "Authorization: Bearer $token" )
+fi
+
 if jq -e '.source.insecure' >/dev/null 2>&1 < "${payload}"
 then
     curl_options+=( -k )
 fi
 
-if proxy=$(jq -re '.source.proxy' >/dev/null 2>&1 < "${payload}")
+if proxy=$(jq -re '.source.proxy' < "${payload}")
 then
     curl_options+=( --proxy "${proxy}" )
 fi
@@ -114,32 +139,31 @@ then
 
   body=$(jq \
     --arg text "$text_interpolated" \
-    --argjson channel "$channel" \
+    --arg channel "$channel" \
+    --arg thread_ts "$thread_ts" \
     --argjson username "$username" \
     '.params | {
       $text,
       $channel,
+      $thread_ts,
       $username,
       link_names,
       icon_url,
       icon_emoji,
-      attachments,
-      thread_ts
+      attachments
     } | with_entries(select(.value))' "$payload"
   )
 
   jq -c . <<<"$body" > /tmp/compact_body.json
 
-  if [[ "$debug" == "true" ]]
+  if jq -e '.params.debug' >/dev/null 2>&1 < "${payload}"
   then
-    debug_info="$(cat <<EOF
-{
-  "webhook_url": "${webhook_url}",
-  "body": ${body}
-}
-EOF
-)"
-  elif [[ "$silent" == "true" ]]
+    debug_info="$(jq -n \
+      --arg webhook_url "$webhook_url" \
+      --argjson body "$body" \
+      '{ $webhook_url, $body }'
+    )"
+  elif jq -e '.params.silent' >/dev/null 2>&1 < "${payload}"
   then
     echo "Using silent output"
     curl -s "${curl_options[@]}" "${webhook_url}"
@@ -152,7 +176,7 @@ EOF
   fi
 fi
 
-if jq -re '.params.metadata' >/dev/null 2>&1 < "${payload}"
+if jq -e '.params.metadata' >/dev/null 2>&1 < "${payload}"
 then
   redacted_webhook_url=$(echo "${webhook_url}" | sed -e 's#/\([^/\.]\{2\}\)[^/.]\{5,\}\([^/.]\{2\}\)#/\1…\2#g')
   escaped_text_file="$(echo $text_file | jq -R -s . )"
@@ -161,7 +185,7 @@ then
   metadata=$(
     jq -n \
       --arg url "$redacted_webhook_url" \
-      --argjson channel "$channel" \
+      --arg channel "$channel" \
       --argjson username "$username" \
       --arg text "$text_interpolated" \
       --arg text_file "$text_file" \
@@ -190,7 +214,7 @@ then
   fi
 fi
 
-jq --argjson timestamp "$timestamp" \
+jq \
   --argjson metadata "${metadata:-null}" \
   --argjson debug "${debug_info:-null}" \
-  '{ version: { $timestamp, thread_ts: .ts, channel } } + $metadata + $debug' /tmp/output.json >&3
+  '{ version: { thread_ts: .ts, channel } } + $metadata + $debug' /tmp/output.json >&3
