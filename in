@@ -62,16 +62,23 @@ body=$(jq \
     inclusive: true
   }' < "${payload}")
 
-if curl -fSs "${curl_options[@]}" -d "$body" https://slack.com/api/conversations.history
+if ! curl -Ss --fail-with-body "${curl_options[@]}" -d "$body" https://slack.com/api/conversations.history
 then
-  thread_ts=$(jq -r '.messages[0] | .ts' < /tmp/output.json)
-  echo "$thread_ts" > "${destination}/thread_ts"
-  echo "$channel" > "${destination}/channel"
-else
-  ret=$?
-  echo "failed to fetch message" >&2
-  exit $ret
-fi
+  echo 'request to Slack API failed'
+  jq . < /tmp/output.json
+  exit 1
+fi >&2
+
+if ! jq -e '.ok' >/dev/null 2>&1 < /tmp/output.json
+then
+  echo 'error response from Slack API'
+  jq . < /tmp/output.json
+  exit 1
+fi >&2
+
+thread_ts=$(jq -r '.messages[0] | .ts' < /tmp/output.json)
+echo "$thread_ts" > "${destination}/thread_ts"
+echo "$channel" > "${destination}/channel"
 
 jq -n \
   --arg thread_ts "$thread_ts" \
