@@ -95,11 +95,15 @@ then
   fi
 fi
 
+output_file=/tmp/output.json
+touch "$output_file"
+echo '{}' > "$output_file"
+
 curl_options=(
   -H 'Content-Type: application/json; charset=utf-8'
   -T /tmp/compact_body.json
   -X POST
-  -o /tmp/output.json
+  -o "$output_file"
 )
 
 if token="$(jq -re '.source.token' < "${payload}")"
@@ -144,14 +148,14 @@ then
     --argjson username "$username" \
     '.params | {
       $text,
-      $channel,
-      $thread_ts,
+      channel: (if $channel != "" then $channel else null end),
+      thread_ts: (if $thread_ts != "" then $thread_ts else null end),
       $username,
-      link_names,
+      link_names: (.link_names // false),
       icon_url,
       icon_emoji,
       attachments
-    } | with_entries(select(.value))' "$payload"
+    }' "$payload"
   )
 
   jq -c . <<<"$body" > /tmp/compact_body.json
@@ -217,4 +221,4 @@ fi
 jq \
   --argjson metadata "${metadata:-null}" \
   --argjson debug "${debug_info:-null}" \
-  '{ version: { thread_ts: .ts, channel } } + $metadata + $debug' /tmp/output.json >&3
+  '{ version: { thread_ts: .ts, channel } } + $metadata + $debug' "$output_file" >&3
