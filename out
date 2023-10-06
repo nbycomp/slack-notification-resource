@@ -14,7 +14,7 @@ payload=$(mktemp /tmp/resource-in.XXXXXX)
 
 cat > "${payload}" <&0
 
-if jq -re '.source.disable' < "${payload}"
+if jq -re '.source.disable' >/dev/null 2>&1 < "${payload}"
 then
     jq -n --arg timestamp "$(date +%s)" '{
       version: null,
