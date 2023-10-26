@@ -161,7 +161,11 @@ test metadata_with_payload | jq -e "
   ( .metadata[4].name == \"text_file\" )        and ( .metadata[4].value == \"\" ) and
   ( .metadata[5].name == \"text_file_exists\" ) and ( .metadata[5].value == \"No\" )  and
   ( .metadata[6].name == \"text_file_content\" ) and ( .metadata[6].value == \"${missing_text}\" )  and
-  ( .metadata[7].name == \"payload\" )          and ( .metadata[7].value | fromjson.source.url == \"***REDACTED***\" ) and
+  ( .metadata[7].name == \"payload\" ) and
+  ( .metadata[7].value | fromjson |
+    .source.url == \"***WEBHOOK URL REDACTED***\" and
+    .source.token == \"***TOKEN REDACTED***\"
+  ) and
   ( .metadata | length == 8 )"
 
 test attachments_no_text | jq -e "

@@ -194,7 +194,9 @@ then
   elif [[ ${redact_hook} == "true" ]]
   then
     url_path="$(echo ${webhook_url} | sed -e "s/https\{0,1\}:\/\/[^\/]*\(\/[^?&#]*\).*/\1/")"
-    curl -v "${curl_options[@]}" "${webhook_url}" 2>&1 | sed -e "s#${url_path}#***WEBHOOK URL REDACTED***#g"
+    curl -v "${curl_options[@]}" "${webhook_url}" 2>&1 |
+      sed -e "s#${url_path}#***WEBHOOK URL REDACTED***#g" |
+      sed -e "s#${token}#***TOKEN REDACTED***#g"
   else
     curl -v "${curl_options[@]}" "${webhook_url}" 2>&1
   fi
@@ -230,7 +232,8 @@ then
   then
     if [[ ${redact_hook} == "true" ]]
     then
-      payload_string="$(jq -rc '.source.url = "***REDACTED***"' < "${payload}")"
+      payload_string="$(jq -rc '.source.url = "***WEBHOOK URL REDACTED***" |
+        .source.token = "***TOKEN REDACTED***"' < "${payload}")"
     else
       payload_string="$(jq -rc '.' < "${payload}")"
     fi
