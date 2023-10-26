@@ -25,7 +25,11 @@ then
     exit 0
 fi
 
-webhook_url="$(jq -r '.source.url // "https://slack.com/api/chat.postMessage"' < "${payload}")"
+webhook_url="$(jq -r '.source.url //
+  (
+    "https://slack.com/api/chat." +
+    if .params.update then "update" else "postMessage" end
+  )' < "${payload}")"
 raw_ca_certs=$(jq -r '.source.ca_certs // []' < $payload)
 
 text_file="$(jq -r '.params.text_file // ""' < "${payload}")"
@@ -35,7 +39,10 @@ attachments="$(jq '(.params.attachments // null)' < "${payload}")"
 attachments_file="$(jq -r '.params.attachments_file // ""' < "${payload}")"
 
 channel="$(jq -r '.params.channel // ""' < "${payload}")"
+# thread_ts is used to post a reply to a message in a thread
 thread_ts="$(jq -r '.params.thread_ts // ""' < "${payload}")"
+# ts is used to update a message
+ts="$(jq -r '.params.ts // ""' < "${payload}")"
 
 username="$(jq '.params.username' < "${payload}")"
 
@@ -95,6 +102,16 @@ then
   fi
 fi
 
+# if set, ts param takes precedence over ts_file
+if [[ -z $ts ]]
+then
+  ts_file="$(jq -r '.params.ts_file' < "${payload}")"
+  if [[ -n $ts_file && -f $ts_file ]]
+  then
+    ts=$(<"$ts_file")
+  fi
+fi
+
 output_file=/tmp/output.json
 touch "$output_file"
 echo '{}' > "$output_file"
@@ -135,27 +152,30 @@ then
 
   text_interpolated=$(echo -n "$text" | envsubst)
 
-  if [[ -z "${text_interpolated}" ]]
+  if [[ -z "${text_interpolated}" && -z "${attachments}" ]]
   then
     text_interpolated="_(missing notification text)_"
-    [[ -n "${attachments}" ]] && text_interpolated="null"
   fi
 
   body=$(jq \
     --arg text "$text_interpolated" \
     --arg channel "$channel" \
     --arg thread_ts "$thread_ts" \
+    --arg ts "$ts" \
+    --argjson attachments "$attachments" \
     --argjson username "$username" \
     '.params | {
-      $text,
+      text: (if $text != "" then $text else null end),
       channel: (if $channel != "" then $channel else null end),
-      thread_ts: (if $thread_ts != "" then $thread_ts else null end),
       $username,
       link_names: (.link_names // false),
       icon_url,
       icon_emoji,
-      attachments
-    }' "$payload"
+      $attachments
+    } +
+    if .update then { $ts }
+    elif $thread_ts != "" then { $thread_ts }
+    else {} end' "$payload"
   )
 
   jq -c . <<<"$body" > /tmp/compact_body.json
