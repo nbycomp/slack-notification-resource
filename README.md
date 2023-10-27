@@ -164,6 +164,21 @@ Optional:
   errors or missing text. (Expects true or false, defaults to
   false).
 
+- `update`: _Optional._ Set to `true` to update an existing message
+  using the [chat.update endpoint](https://api.slack.com/methods/chat.update).
+  Requires the `token` to be set, and the timestamp of the original message
+  to be passed via `ts` or `ts_file`.
+
+- `ts`/`ts_file`: _Optional. Required when update is enabled_. The timestamp
+  of an existing message.
+
+- `thread_ts`/`thread_ts_file`: _Optional._ The timestamp a message in
+  a specified `channel`, to which a message should be posted as a reply.
+  Note that the timestamp should always be for the message in the parent channel,
+  **not** another message in the thread. Note that this uses the
+  [chat.postMessage endpoint](https://api.slack.com/methods/chat.postMessage), which
+  requires a `token` to be set, and not a custom `webhook_url`.
+
 Explore formatting with Slack's [Message Builder][build].
 
 #### Metadata
