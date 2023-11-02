@@ -1,0 +1,13 @@
+{
+  "params": {
+    "text": "Updated message",
+    "username": "concourse",
+    "debug": "true",
+    "update": true,
+    "channel": "C1234567890",
+    "ts_file": "update-ts-file.txt"
+  },
+  "source": {
+    "token": "xxxx-xxxxxxxxx-xxxx"
+  }
+}

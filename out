@@ -1,12 +1,12 @@
 #!/bin/bash
 
-set -e
+set -eu
 
 cd "${1}"
 
 exec 3>&1
 exec 1>&2
-set +x
+
 # for jq
 PATH=/usr/local/bin:$PATH
 
@@ -14,47 +14,47 @@ payload=$(mktemp /tmp/resource-in.XXXXXX)
 
 cat > "${payload}" <&0
 
-timestamp="$(jq -n "{version:{timestamp:\"$(date +%s)\"}}")"
-
-disable="$(jq -r '.source.disable' < "${payload}")"
-if [[ "$disable" == "true" ]]
+if jq -re '.source.disable' >/dev/null 2>&1 < "${payload}"
 then
-    echo "$timestamp" >&3
+    jq -n --arg timestamp "$(date +%s)" '{
+      version: null,
+      metadata: [
+        { name: "timestamp", value: $ts }
+      ]
+    }' >&3
     exit 0
 fi
 
-webhook_url="$(jq -r '.source.url' < "${payload}")"
-allow_insecure="$(jq -r '.source.insecure // "false"' < "${payload}")"
+webhook_url="$(jq -r '.source.url //
+  (
+    "https://slack.com/api/chat." +
+    if .params.update then "update" else "postMessage" end
+  )' < "${payload}")"
 raw_ca_certs=$(jq -r '.source.ca_certs // []' < $payload)
 
 text_file="$(jq -r '.params.text_file // ""' < "${payload}")"
 text="$(jq -r '(.params.text // "${TEXT_FILE_CONTENT}")' < "${payload}")"
-username="$(jq '(.params.username // null)' < "${payload}")"
-icon_url="$(jq '(.params.icon_url // null)' < "${payload}")"
-icon_emoji="$(jq '(.params.icon_emoji // null)' < "${payload}")"
-link_names="$(jq -r '(.params.link_names // false)' < "${payload}")"
 
-channels="$(jq -r '(.params.channel // null)' < "${payload}")"
-channel_file="$(jq -r '(.params.channel_file // null)' < "${payload}")"
+attachments="$(jq '(.params.attachments // null)' < "${payload}")"
 attachments_file="$(jq -r '.params.attachments_file // ""' < "${payload}")"
-attachments=$(jq -r '(.params.attachments // null)' < $payload)
 
-debug="$(jq -r '.params.debug // "false"' < "${payload}")"
-show_metadata="$(jq -r '.params.metadata // "false"' < "${payload}")"
-show_payload="$(jq -r '.params.payload_in_metadata // "false"' < "${payload}")"
-silent="$(jq -r '.params.silent // "false"' < "${payload}")"
+channel="$(jq -r '.params.channel // ""' < "${payload}")"
+# thread_ts is used to post a reply to a message in a thread
+thread_ts="$(jq -r '.params.thread_ts // ""' < "${payload}")"
+# ts is used to update a message
+ts="$(jq -r '.params.ts // ""' < "${payload}")"
+
+username="$(jq '.params.username' < "${payload}")"
+
 always_notify="$(jq -r '.params.always_notify // "false"' < "${payload}")"
 redact_hook="$(jq -r '.params.redact_hook_url // "true"' < "${payload}")"
-
-proxy="$(jq -r '.source.proxy // "null"' < "${payload}")"
-proxy_https_tunnel="$(jq -r '.source.proxy_https_tunnel // "false"' < "${payload}")"
 
 # Read the env_file and export it in the current console
 env_file="$(jq -r '.params.env_file // ""' < "${payload}")"
 if [ -f "$env_file" ]; then
   # export key=value, when value as space but no quotes
   search_key_val='(\w+)=([^\n]+)'
-  
+
   source <(sed -E -n -r "s/$search_key_val/export \1=\"\2\"/ p" "$env_file")
 fi
 
@@ -82,29 +82,65 @@ fi
 
 attachments=$(echo "$attachments" | envsubst)
 
-[[ -n "${channel_file}" && -f "${channel_file}" ]] && channels="${channels} $(cat "${channel_file}")"
-
-for channel in ${channels}
-do
-
-debug_info=""
-metadata=""
-body=""
-
-
-if [[ "$allow_insecure" == "true" ]]
+# if set, channel param takes precedence over channel_file
+if [[ -z $channel ]]
 then
-    CURL_OPTION="${CURL_OPTION} -k"
+  channel_file="$(jq -r '.params.channel_file' < "${payload}")"
+  if [[ -n $channel_file && -f $channel_file ]]
+  then
+    channel=$(<"$channel_file")
+  fi
 fi
 
-if [[ "$proxy" != "null" ]]
+# if set, thread_ts param takes precedence over thread_ts_file
+if [[ -z $thread_ts ]]
 then
-    CURL_OPTION="${CURL_OPTION} --proxy ${proxy}"
+  thread_ts_file="$(jq -r '.params.thread_ts_file' < "${payload}")"
+  if [[ -n $thread_ts_file && -f $thread_ts_file ]]
+  then
+    thread_ts=$(<"$thread_ts_file")
+  fi
 fi
 
-if [[ "$proxy_https_tunnel" == "true" ]]
+# if set, ts param takes precedence over ts_file
+if [[ -z $ts ]]
 then
-    CURL_OPTION="${CURL_OPTION} --proxytunnel"
+  ts_file="$(jq -r '.params.ts_file' < "${payload}")"
+  if [[ -n $ts_file && -f $ts_file ]]
+  then
+    ts=$(<"$ts_file")
+  fi
+fi
+
+output_file=/tmp/output.json
+touch "$output_file"
+echo '{}' > "$output_file"
+
+curl_options=(
+  -H 'Content-Type: application/json; charset=utf-8'
+  -T /tmp/compact_body.json
+  -X POST
+  -o "$output_file"
+)
+
+if token="$(jq -re '.source.token' < "${payload}")"
+then
+  curl_options+=( -H "Authorization: Bearer $token" )
+fi
+
+if jq -e '.source.insecure' >/dev/null 2>&1 < "${payload}"
+then
+    curl_options+=( -k )
+fi
+
+if proxy=$(jq -re '.source.proxy' < "${payload}")
+then
+    curl_options+=( --proxy "${proxy}" )
+fi
+
+if jq -e '.source.proxy_https_tunnel' >/dev/null 2>&1 < "${payload}"
+then
+    curl_options+=( --proxytunnel )
 fi
 
 if [[ "$always_notify" == "true" || -n "$TEXT_FILE_CONTENT" || -z "$text_file" ]]
@@ -114,101 +150,98 @@ then
     TEXT_FILE_CONTENT="${TEXT_FILE_CONTENT:-_(no notification provided)_}"
   fi
 
-  text_interpolated=$(echo -n "$text" |envsubst)
+  text_interpolated=$(echo -n "$text" | envsubst)
 
-  if [[ -z "${text_interpolated}" ]]
+  if [[ -z "${text_interpolated}" && -z "${attachments}" ]]
   then
     text_interpolated="_(missing notification text)_"
-    [[ -n "${attachments}" ]] && text_interpolated="null"
-  else
-    text_interpolated="$(echo "${text_interpolated}" | jq -R -s .)"
   fi
 
-  [[ "${username}"   != "null" ]] && username="$(eval "printf ${username}" | jq -R -s .)"
-  [[ "${icon_url}"   != "null" ]] && icon_url="$(eval "printf ${icon_url}" | jq -R -s .)"
-  [[ "${icon_emoji}" != "null" ]] && icon_emoji="$(eval "printf ${icon_emoji}" | jq -R -s .)"
-  [[ "${channel}"    != "null" ]] && channel=\"${channel}\" && channel="$(eval "printf ${channel}" | jq -R -s .)"
+  body=$(jq \
+    --arg text "$text_interpolated" \
+    --arg channel "$channel" \
+    --arg thread_ts "$thread_ts" \
+    --arg ts "$ts" \
+    --argjson attachments "$attachments" \
+    --argjson username "$username" \
+    '.params | {
+      text: (if $text != "" then $text else null end),
+      channel: (if $channel != "" then $channel else null end),
+      $username,
+      link_names: (.link_names // false),
+      icon_url,
+      icon_emoji,
+      $attachments
+    } +
+    if .update then { $ts }
+    elif $thread_ts != "" then { $thread_ts }
+    else {} end' "$payload"
+  )
 
-  body="$(cat <<EOF
-{
-  "text": ${text_interpolated},
-  "username": ${username},
-  "link_names": ${link_names},
-  "icon_url": ${icon_url},
-  "icon_emoji": ${icon_emoji},
-  "channel": ${channel},
-  "attachments": ${attachments}
-}
-EOF
-  )"
+  jq -c . <<<"$body" > /tmp/compact_body.json
 
-  # needed for mattermost compatibility as they don't accept link_names
-  if [[ "$link_names" == "true" ]]
+  if jq -e '.params.debug' >/dev/null 2>&1 < "${payload}"
   then
-    compact_body="$(echo "${body}" | jq -c '.')"
-  else
-    compact_body="$(echo "${body}" | jq -c 'with_entries(select(.key != "link_names"))')"
-  fi
-  echo "$compact_body" > /tmp/compact_body.json
-
-  if [[ "$debug" == "true" ]]
-  then
-    debug_info="$(cat <<EOF
-{
-  "webhook_url": "${webhook_url}",
-  "body": ${body}
-}
-EOF
-)"
-  elif [[ "$silent" == "true" ]]
+    debug_info="$(jq -n \
+      --arg webhook_url "$webhook_url" \
+      --argjson body "$body" \
+      '{ $webhook_url, $body }'
+    )"
+  elif jq -e '.params.silent' >/dev/null 2>&1 < "${payload}"
   then
     echo "Using silent output"
-    curl -s -X POST -T /tmp/compact_body.json ${CURL_OPTION} "${webhook_url}"
+    curl -s "${curl_options[@]}" "${webhook_url}"
   elif [[ ${redact_hook} == "true" ]]
   then
     url_path="$(echo ${webhook_url} | sed -e "s/https\{0,1\}:\/\/[^\/]*\(\/[^?&#]*\).*/\1/")"
-    curl -v -X POST -T /tmp/compact_body.json ${CURL_OPTION} "${webhook_url}" 2>&1 | sed -e "s#${url_path}#***WEBHOOK URL REDACTED***#g"
+    curl -v "${curl_options[@]}" "${webhook_url}" 2>&1 |
+      sed -e "s#${url_path}#***WEBHOOK URL REDACTED***#g" |
+      sed -e "s#${token}#***TOKEN REDACTED***#g"
   else
-    curl -v -X POST -T /tmp/compact_body.json ${CURL_OPTION} "${webhook_url}" | sed -e "s#${url_path}#***WEBHOOK URL REDACTED***#g"
+    curl -v "${curl_options[@]}" "${webhook_url}" 2>&1
   fi
-else
-  text_interplated="$(echo "" | jq -R -s .)"
 fi
 
-done
-
-if [[ "$show_metadata" == "true" ]]
+if jq -e '.params.metadata' >/dev/null 2>&1 < "${payload}"
 then
-  redacted_webhook_url=$(echo "${webhook_url}" | sed -e 's#/\([^/\.]\{2\}\)[^/.]\{5,\}\([^/.]\{2\}\)#/\1…\2#g' | jq -R .)
+  redacted_webhook_url=$(echo "${webhook_url}" | sed -e 's#/\([^/\.]\{2\}\)[^/.]\{5,\}\([^/.]\{2\}\)#/\1…\2#g')
   escaped_text_file="$(echo $text_file | jq -R -s . )"
-  if [[ ${redact_hook} == "true" ]]
-  then
-    escaped_payload="$(cat $payload | jq -rcM ".source.url = \"***REDACTED***\"" | jq -R -s . )"
-  else
-    escaped_payload="$(cat $payload | jq -rcM ".source.url = \"***REDACTED***\"" | jq -R -s . )"
-  fi
-
-  escaped_content="$(echo $TEXT_FILE_CONTENT | jq -R -s . )"
   text_file_exists="No" && [[ -n "$text_file" ]] && [[ -f "$text_file" ]] && text_file_exists=Yes
-  metadata="$(cat <<EOF
-{
-  "metadata": [
-    {"name": "url",               "value": ${redacted_webhook_url}},
-    {"name": "channel",           "value": "${channels}"          },
-    {"name": "username",          "value": ${username}            },
-    {"name": "text",              "value": ${text_interpolated}   },
-    {"name": "text_file",         "value": $( echo "$text_file"         | jq -R . ) },
-    {"name": "text_file_exists",  "value": $( echo "$text_file_exists"  | jq -R . ) },
-    {"name": "text_file_content", "value": $( echo "$TEXT_FILE_CONTENT" | jq -R -s . ) }
-  ]
-}
-EOF
-  )"
-  if [[ "${show_payload}" == "true" ]]
-  then
-    metadata="$( echo ${metadata} | jq -r ".metadata += [{name: \"payload\", value: $escaped_payload}]")"
-  fi
 
+  metadata=$(
+    jq -n \
+      --arg url "$redacted_webhook_url" \
+      --arg channel "$channel" \
+      --argjson username "$username" \
+      --arg text "$text_interpolated" \
+      --arg text_file "$text_file" \
+      --arg text_file_exists "$text_file_exists" \
+      --arg text_file_content "$TEXT_FILE_CONTENT" \
+      '{
+        $url,
+        $channel,
+        $username,
+        $text,
+        $text_file,
+        $text_file_exists,
+        $text_file_content
+      } | to_entries | map({ name: .key, value }) | { metadata: . }'
+  )
+
+  if jq -re '.params.payload_in_metadata' >/dev/null 2>&1 < "${payload}"
+  then
+    if [[ ${redact_hook} == "true" ]]
+    then
+      payload_string="$(jq -rc '.source.url = "***WEBHOOK URL REDACTED***" |
+        .source.token = "***TOKEN REDACTED***"' < "${payload}")"
+    else
+      payload_string="$(jq -rc '.' < "${payload}")"
+    fi
+    metadata="$(jq -r --arg payload "$payload_string" '.metadata += [{name: "payload", value: $payload}]' <<<"$metadata")"
+  fi
 fi
 
-echo "$timestamp $metadata $debug_info " | jq -s add  >&3
+jq \
+  --argjson metadata "${metadata:-null}" \
+  --argjson debug "${debug_info:-null}" \
+  '{ version: { thread_ts: .ts, channel } } + $metadata + $debug' "$output_file" >&3
